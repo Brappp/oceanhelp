@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
@@ -10,6 +9,7 @@ using SamplePlugin.Windows;
 using Dalamud.Plugin.Services;
 using System.Linq;
 using Dalamud.IoC;
+using System.Globalization;
 
 namespace SamplePlugin
 {
@@ -19,7 +19,7 @@ namespace SamplePlugin
         public Configuration Configuration { get; private set; }
         private const string CommandName = "/logmonitor";
 
-        // Make these public so they can be accessed/modified from MainWindow
+        // Public property for MainWindow access
         public string LogDirectory { get; set; }
 
         // Timer tracking fields
@@ -27,7 +27,7 @@ namespace SamplePlugin
         private DateTime? _nextCommandExecutionTime;
         private bool _pendingExecution;
 
-        // Timer properties that MainWindow uses
+        // Timer properties for UI
         public TimeSpan TimeUntilNextCheck =>
             _lastCheckTime.AddMinutes(Configuration.CheckIntervalMinutes) - DateTime.Now;
 
@@ -41,6 +41,7 @@ namespace SamplePlugin
         private CancellationTokenSource _cancellationTokenSource;
         private readonly WindowSystem _windowSystem;
         private readonly MainWindow _mainWindow;
+        private ConfigWindow _configWindow; // New config window
         private Task _monitoringTask;
 
         [PluginService] public static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -68,34 +69,36 @@ namespace SamplePlugin
                 HelpMessage = "Commands: /logmonitor forcecheck, /logmonitor status"
             });
 
-            // Setup window system
+            // Setup window system and UI
             _windowSystem = new WindowSystem(Name);
             _mainWindow = new MainWindow(this);
+            _configWindow = new ConfigWindow(this); // Create config window
             _windowSystem.AddWindow(_mainWindow);
+            _windowSystem.AddWindow(_configWindow);
 
-            // Register UI events
             PluginInterface.UiBuilder.Draw += DrawUI;
             PluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
             PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
 
-            // Start monitoring
+            // Start monitoring logs
             StartMonitoring();
             PluginLog.Information($"{Name} initialized with log directory: {LogDirectory}");
         }
 
         private void EnsureConfigurationDefaults()
         {
-            // Ensure sensible defaults
-            Configuration.MonitorEnabled = Configuration.MonitorEnabled; // Keeps existing value or defaults to true
+            // Use existing values or defaults
+            Configuration.MonitorEnabled = Configuration.MonitorEnabled;
             Configuration.CheckIntervalMinutes = Configuration.CheckIntervalMinutes > 0
                 ? Configuration.CheckIntervalMinutes
-                : 5; // Default to 5 minutes if not set or invalid
+                : 5;
             Configuration.ChatCommand ??= "/echo Ocean trip found!";
+            // Default: do not delete old files unless explicitly enabled
+            Configuration.DeleteOldFiles = Configuration.DeleteOldFiles;
         }
 
         public void Dispose()
         {
-            // Cleanup method
             StopMonitoring();
             PluginInterface.UiBuilder.Draw -= DrawUI;
             PluginInterface.UiBuilder.OpenConfigUi -= OpenConfigUi;
@@ -129,30 +132,19 @@ namespace SamplePlugin
 
         private void StartMonitoring()
         {
-            // Stop any existing monitoring to prevent duplicate threads
             StopMonitoring();
-
-            // Create a new cancellation token source
             _cancellationTokenSource = new CancellationTokenSource();
-
-            // Start a new monitoring task
             _monitoringTask = Task.Run(async () =>
             {
                 while (!_cancellationTokenSource.Token.IsCancellationRequested)
                 {
-                    // Only check if monitoring is enabled and no command is pending execution
                     if (Configuration.MonitorEnabled && !_pendingExecution)
                     {
                         CheckLogs(false);
                     }
-
                     try
                     {
-                        // Wait for the configured interval before next check
-                        await Task.Delay(
-                            TimeSpan.FromMinutes(Configuration.CheckIntervalMinutes),
-                            _cancellationTokenSource.Token
-                        );
+                        await Task.Delay(TimeSpan.FromMinutes(Configuration.CheckIntervalMinutes), _cancellationTokenSource.Token);
                     }
                     catch (TaskCanceledException)
                     {
@@ -164,7 +156,6 @@ namespace SamplePlugin
 
         private void StopMonitoring()
         {
-            // Safely stop the monitoring task
             if (_cancellationTokenSource != null)
             {
                 _cancellationTokenSource.Cancel();
@@ -176,7 +167,7 @@ namespace SamplePlugin
 
         public void CheckLogs(bool isForced)
         {
-            // Don't perform check if there's a pending execution, unless it's a forced check
+            // If a command is pending and not forced, skip the check
             if (_pendingExecution && !isForced)
             {
                 PluginLog.Information("Skipping check due to pending command execution");
@@ -187,14 +178,14 @@ namespace SamplePlugin
             {
                 _lastCheckTime = DateTime.Now;
 
-                // Validate log directory exists
+                // Ensure the log directory exists
                 if (!Directory.Exists(LogDirectory))
                 {
                     ChatGui.PrintError($"Log directory not found: {LogDirectory}");
                     throw new DirectoryNotFoundException($"Log directory not found: {LogDirectory}");
                 }
 
-                // Get log files sorted by most recent first
+                // Retrieve all log files sorted by last write time (most recent first)
                 var logFiles = Directory.GetFiles(LogDirectory, "*.txt")
                     .OrderByDescending(f => new FileInfo(f).LastWriteTime)
                     .ToArray();
@@ -205,167 +196,161 @@ namespace SamplePlugin
                     throw new FileNotFoundException($"No log files found in directory: {LogDirectory}");
                 }
 
-                // Debug output
                 ChatGui.Print($"Checking {logFiles.Length} log files");
                 PluginLog.Information($"Checking {logFiles.Length} log files from {LogDirectory}");
 
-                // Set up initial tracking variables
-                var lastProcessedTime = Configuration.LastProcessedTime ?? DateTime.MinValue;
-                DateTime? latestEntryTime = null;
-                bool foundNewEntry = false;
-                string latestEntry = null;
+                // Use the stored last processed time and file name for comparison
+                DateTime lastProcessedTime = Configuration.LastProcessedTime ?? DateTime.MinValue;
+                string storedFile = Configuration.LastProcessedFileName;
 
-                // Regex to match ocean trip log entries - ensuring it's case-insensitive
-                var regex = new Regex(@"\[(\d{2}:\d{2}:\d{2}\.\d{3}) N\] \[Ocean Trip\] Next boat is in (\d+) minutes\. Passing the time until then\.",
-                    RegexOptions.IgnoreCase);
+                // Local candidate variables for the most recent matching entry
+                DateTime? candidateEntryTime = null;
+                string candidateEntryLine = null;
+                string candidateFile = null;
+                const string targetPhrase = "Next boat is in";
 
-                // Process log files
+                // Process every log file
                 foreach (var file in logFiles)
                 {
-                    var fileInfo = new FileInfo(file);
-                    var fileDate = fileInfo.LastWriteTime.Date;
-
+                    FileInfo fileInfo = new FileInfo(file);
+                    // Use the full LastWriteTime
+                    DateTime fileDate = fileInfo.LastWriteTime;
                     PluginLog.Information($"Examining log file: {file} from {fileDate:yyyy-MM-dd}");
 
                     try
                     {
-                        var fileContent = File.ReadAllText(file);
-                        var lines = fileContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-                        PluginLog.Information($"Found {lines.Length} lines in file");
-
-                        // Check each line for matches
-                        foreach (var line in lines.Reverse())
+                        using (StreamReader reader = new StreamReader(file))
                         {
-                            var match = regex.Match(line);
-                            if (match.Success)
+                            string line;
+                            while ((line = reader.ReadLine()) != null)
                             {
-                                var timeStr = match.Groups[1].Value;
-                                PluginLog.Information($"Found matching entry: {line} with time {timeStr}");
-
-                                if (DateTime.TryParse($"{fileDate:yyyy-MM-dd} {timeStr}",
-                                    System.Globalization.CultureInfo.InvariantCulture,
-                                    System.Globalization.DateTimeStyles.None,
-                                    out DateTime entryTime))
+                                if (line.Contains("[Ocean Trip]") && line.Contains(targetPhrase))
                                 {
-                                    // Adjust for potential day rollover
-                                    if (entryTime.TimeOfDay > fileDate.TimeOfDay.Add(TimeSpan.FromHours(12)))
+                                    int closingBracket = line.IndexOf(']');
+                                    if (closingBracket > 0)
                                     {
-                                        entryTime = entryTime.AddDays(-1);
-                                        PluginLog.Information($"Adjusted entry time for day rollover: {entryTime}");
+                                        string timeStr = line.Substring(1, closingBracket - 1).Split(' ')[0];
+                                        PluginLog.Information($"Found matching line: {line}");
+                                        PluginLog.Information($"Time string extracted: {timeStr}");
+                                        string dateTimeStr = $"{fileDate:yyyy-MM-dd} {timeStr}";
+                                        if (DateTime.TryParseExact(dateTimeStr, "yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime entryTime))
+                                        {
+                                            PluginLog.Information($"Parsed entry time: {entryTime:yyyy-MM-dd HH:mm:ss.fff}");
+                                            if (!candidateEntryTime.HasValue || entryTime > candidateEntryTime.Value)
+                                            {
+                                                candidateEntryTime = entryTime;
+                                                candidateEntryLine = line;
+                                                candidateFile = file;
+                                            }
+                                            else if (entryTime == candidateEntryTime.Value &&
+                                                     (storedFile == null || !string.Equals(file, storedFile, StringComparison.OrdinalIgnoreCase)))
+                                            {
+                                                candidateEntryTime = entryTime;
+                                                candidateEntryLine = line;
+                                                candidateFile = file;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            PluginLog.Error($"Failed to parse date/time from: {dateTimeStr}");
+                                        }
                                     }
-
-                                    // Debug output the time comparison
-                                    PluginLog.Information($"Entry time: {entryTime}, Last processed: {lastProcessedTime}, Compare: {entryTime > lastProcessedTime}");
-
-                                    // Track the latest entry time
-                                    if (!latestEntryTime.HasValue || entryTime > latestEntryTime.Value)
+                                    else
                                     {
-                                        latestEntryTime = entryTime;
-                                        latestEntry = line;
-                                        PluginLog.Information($"New latest entry found: {latestEntry} at {latestEntryTime}");
+                                        PluginLog.Warning($"Line format unexpected: {line}");
                                     }
-
-                                    // Check if this is a new entry since last processed
-                                    if (entryTime > lastProcessedTime)
-                                    {
-                                        foundNewEntry = true;
-                                        PluginLog.Information($"New entry detected: {entryTime} > {lastProcessedTime}");
-                                    }
-                                }
-                                else
-                                {
-                                    PluginLog.Error($"Failed to parse date/time from: {fileDate:yyyy-MM-dd} {timeStr}");
                                 }
                             }
-                        }
-
-                        // If we found the latest entry time, debug output its value
-                        if (latestEntryTime.HasValue)
-                        {
-                            PluginLog.Information($"Latest entry time: {latestEntryTime.Value}");
                         }
                     }
                     catch (Exception ex)
                     {
                         PluginLog.Error($"Error reading log file {file}: {ex.Message}");
-                        // Continue to the next file even if there's an error with this one
+                        ChatGui.PrintError($"Error reading log file {Path.GetFileName(file)}: {ex.Message}");
                     }
                 }
 
-                // Force check and no log files found
-                if (logFiles.Length == 0 && isForced)
+                if (isForced)
                 {
-                    ChatGui.Print("No log files found to check.");
-                    return;
-                }
-
-                // Process the new entry if found
-                if (foundNewEntry && !_pendingExecution)
-                {
-                    // Ensure we don't process the same entry again
-                    if (latestEntryTime.HasValue && latestEntryTime.Value > lastProcessedTime)
+                    if (candidateEntryTime.HasValue)
                     {
-                        ChatGui.Print("New ocean trip detected, command will be executed in 1 minute.");
-                        PluginLog.Information($"New ocean trip detected: {latestEntry}");
-
-                        // Mark as pending and set execution time
-                        _pendingExecution = true;
-                        _nextCommandExecutionTime = DateTime.Now.AddMinutes(1);
-
-                        // Update configuration with latest processed entry
-                        Configuration.LastProcessedTime = latestEntryTime.Value;
-                        Configuration.LastFoundEntry = latestEntry;
+                        ChatGui.Print($"Latest ocean trip found: {candidateEntryLine}");
+                        ChatGui.Print($"Entry time: {candidateEntryTime.Value:yyyy-MM-dd HH:mm:ss}, Last processed: {lastProcessedTime:yyyy-MM-dd HH:mm:ss}");
+                        bool isNew = candidateEntryTime.Value > lastProcessedTime ||
+                                     (candidateEntryTime.Value == lastProcessedTime &&
+                                      (storedFile == null || !string.Equals(candidateFile, storedFile, StringComparison.OrdinalIgnoreCase)));
+                        ChatGui.Print($"Is new: {isNew}");
+                        ChatGui.Print("Forcing update of LastProcessedTime since this is a manual check.");
+                        Configuration.LastProcessedTime = candidateEntryTime.Value;
+                        Configuration.LastFoundEntry = candidateEntryLine;
+                        Configuration.LastProcessedFileName = candidateFile;
                         SaveConfiguration();
-
-                        // Execute command after delay
-                        Task.Run(async () =>
-                        {
-                            try
-                            {
-                                await Task.Delay(TimeSpan.FromMinutes(1));
-                                ExecuteChatCommand(Configuration.ChatCommand);
-                            }
-                            catch (Exception ex)
-                            {
-                                PluginLog.Error($"Error during command execution: {ex.Message}");
-                                ChatGui.PrintError($"Error executing command: {ex.Message}");
-                            }
-                            finally
-                            {
-                                // Reset execution state
-                                _pendingExecution = false;
-                                _nextCommandExecutionTime = null;
-                                PluginLog.Information("Command execution completed, resuming monitoring");
-                            }
-                        });
-                    }
-                    else
-                    {
-                        PluginLog.Information($"Found entry time ({latestEntryTime}) not newer than last processed time ({lastProcessedTime})");
-                    }
-                }
-                else if (isForced)
-                {
-                    // For forced checks, always provide feedback
-                    if (latestEntryTime.HasValue)
-                    {
-                        ChatGui.Print($"Latest ocean trip found: {latestEntry}");
-                        ChatGui.Print($"Entry time: {latestEntryTime.Value}, Last processed: {lastProcessedTime}");
-                        ChatGui.Print($"Is new: {latestEntryTime.Value > lastProcessedTime}");
                     }
                     else
                     {
                         ChatGui.Print("No ocean trip entries found in logs.");
                     }
                 }
+                else if (candidateEntryTime.HasValue &&
+                    (candidateEntryTime.Value > lastProcessedTime ||
+                     (candidateEntryTime.Value == lastProcessedTime &&
+                      (storedFile == null || !string.Equals(candidateFile, storedFile, StringComparison.OrdinalIgnoreCase)))))
+                {
+                    ChatGui.Print("New ocean trip detected, command will be executed in 1 minute.");
+                    PluginLog.Information($"New ocean trip detected: {candidateEntryLine}");
+                    _pendingExecution = true;
+                    _nextCommandExecutionTime = DateTime.Now.AddMinutes(1);
+                    Configuration.LastProcessedTime = candidateEntryTime.Value;
+                    Configuration.LastFoundEntry = candidateEntryLine;
+                    Configuration.LastProcessedFileName = candidateFile;
+                    SaveConfiguration();
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromMinutes(1));
+                            ExecuteChatCommand(Configuration.ChatCommand);
+                        }
+                        catch (Exception ex)
+                        {
+                            PluginLog.Error($"Error during command execution: {ex.Message}");
+                            ChatGui.PrintError($"Error executing command: {ex.Message}");
+                        }
+                        finally
+                        {
+                            _pendingExecution = false;
+                            _nextCommandExecutionTime = null;
+                            PluginLog.Information("Command execution completed, resuming monitoring");
+                        }
+                    });
+                }
 
-                // Update main window status
+                // Delete old files if enabled
+                if (Configuration.DeleteOldFiles && !string.IsNullOrEmpty(Configuration.LastProcessedFileName))
+                {
+                    string candidateFullPath = Path.GetFullPath(Configuration.LastProcessedFileName);
+                    foreach (var file in logFiles)
+                    {
+                        string fileFullPath = Path.GetFullPath(file);
+                        if (!string.Equals(fileFullPath, candidateFullPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                File.Delete(file);
+                                PluginLog.Information($"Deleted old log file: {file}");
+                            }
+                            catch (Exception ex)
+                            {
+                                PluginLog.Error($"Failed to delete file {file}: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+
                 _mainWindow.UpdateStatus();
             }
             catch (Exception ex)
             {
-                // Log and display any errors
                 PluginLog.Error($"Error processing logs: {ex.Message}\n{ex.StackTrace}");
                 ChatGui.PrintError($"Error checking logs: {ex.Message}");
             }
@@ -373,14 +358,11 @@ namespace SamplePlugin
 
         private void ExecuteChatCommand(string command)
         {
-            // Validate command
             if (string.IsNullOrEmpty(command))
             {
                 PluginLog.Error("Cannot execute empty chat command");
                 return;
             }
-
-            // Special handling for echo commands
             if (command.StartsWith("/echo", StringComparison.OrdinalIgnoreCase))
             {
                 string message = command.Substring(5).Trim();
@@ -389,7 +371,6 @@ namespace SamplePlugin
             }
             else
             {
-                // Execute other chat commands
                 try
                 {
                     CommandManager.ProcessCommand(command);
@@ -405,7 +386,6 @@ namespace SamplePlugin
 
         public void SaveConfiguration()
         {
-            // Update and save configuration
             Configuration.LogDirectory = LogDirectory;
             PluginInterface.SavePluginConfig(Configuration);
             PluginLog.Information("Configuration saved successfully.");
@@ -424,6 +404,12 @@ namespace SamplePlugin
         private void OpenMainUi()
         {
             _mainWindow.IsOpen = true;
+        }
+
+        // Public method to toggle the config window
+        public void ToggleConfigWindow()
+        {
+            _configWindow.IsOpen = !_configWindow.IsOpen;
         }
     }
 }

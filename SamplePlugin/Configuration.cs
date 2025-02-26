@@ -19,5 +19,9 @@ namespace SamplePlugin
         // Tracking info
         public DateTime? LastProcessedTime { get; set; } = null;
         public string LastFoundEntry { get; set; } = null;
+        public string LastProcessedFileName { get; set; } = null;
+
+        // Option to delete old log files after processing
+        public bool DeleteOldFiles { get; set; } = false;
     }
 }

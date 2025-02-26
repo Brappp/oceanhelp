@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using Dalamud.Interface.Windowing;
 using ImGuiNET;
+using SamplePlugin;
 
 namespace SamplePlugin.Windows
 {
@@ -11,36 +12,34 @@ namespace SamplePlugin.Windows
         private readonly Plugin _plugin;
         private string _logStatus = "Inactive";
 
-        // Professional color palette
-        private readonly Vector4 _activeColor = new Vector4(0.2f, 0.85f, 0.3f, 1f);      // Active green
-        private readonly Vector4 _inactiveColor = new Vector4(0.85f, 0.2f, 0.2f, 1f);    // Inactive red
-        private readonly Vector4 _timerColor = new Vector4(0.75f, 0.85f, 1f, 1f);        // Light blue for time
-        private readonly Vector4 _pendingColor = new Vector4(0.95f, 0.75f, 0.3f, 1f);    // Amber for pending
-        private readonly Vector4 _borderColor = new Vector4(0.3f, 0.3f, 0.35f, 0.5f);    // Subtle border
-        private readonly Vector4 _labelColor = new Vector4(0.7f, 0.7f, 0.7f, 1f);        // Label text
+        // Color palette for UI elements
+        private readonly Vector4 _activeColor = new Vector4(0.2f, 0.85f, 0.3f, 1f);
+        private readonly Vector4 _inactiveColor = new Vector4(0.85f, 0.2f, 0.2f, 1f);
+        private readonly Vector4 _timerColor = new Vector4(0.75f, 0.85f, 1f, 1f);
+        private readonly Vector4 _pendingColor = new Vector4(0.95f, 0.75f, 0.3f, 1f);
+        private readonly Vector4 _borderColor = new Vector4(0.3f, 0.3f, 0.35f, 0.5f);
+        private readonly Vector4 _labelColor = new Vector4(0.7f, 0.7f, 0.7f, 1f);
 
         private Vector4 _statusColor;
 
         public MainWindow(Plugin plugin)
-            : base("Log Monitor###LogMonitor",
-                  ImGuiWindowFlags.NoResize |
-                  ImGuiWindowFlags.NoScrollbar |
-                  ImGuiWindowFlags.NoScrollWithMouse)
+            : base("Log Monitor###LogMonitor", ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
         {
             _plugin = plugin;
             _configuration = plugin.Configuration;
-            Size = new Vector2(340, 178); // Even more compact height
+            // Increase the window size slightly to accommodate extra UI elements
+            Size = new Vector2(400, 220);
             SizeConstraints = new WindowSizeConstraints
             {
-                MinimumSize = new Vector2(320, 170),
-                MaximumSize = new Vector2(380, 190)
+                MinimumSize = new Vector2(380, 210),
+                MaximumSize = new Vector2(500, 260)
             };
             UpdateStatus();
         }
 
         public override void Draw()
         {
-            // Ultra-compact styling
+            // Push compact styling
             ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(7, 5));
             ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(3, 2));
             ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 2));
@@ -54,115 +53,99 @@ namespace SamplePlugin.Windows
 
             float contentWidth = ImGui.GetContentRegionAvail().X;
 
-            // === STATUS BAR - ultra-compact three-column layout ===
+            // --- Row 1: Status Bar ---
             ImGui.TextColored(_statusColor, _logStatus);
-            ImGui.SameLine(contentWidth * 0.34f); // Position for "Next" 
+            ImGui.SameLine(contentWidth * 0.34f);
             ImGui.TextColored(_timerColor, $"Next: {FormatTimeSpan(_plugin.TimeUntilNextCheck)}");
-
+            ImGui.SameLine(contentWidth * 0.68f);
             string execText = _plugin.TimeUntilCommand.HasValue ? FormatTimeSpan(_plugin.TimeUntilCommand.Value) : "Waiting";
-            ImGui.SameLine(contentWidth * 0.68f); // Position for "Exec"
             ImGui.TextColored(_pendingColor, $"Exec: {execText}");
 
-            // === LAST PROCESSED TIME on same row as log entry label ===
+            // --- Row 2: Last Processed Time ---
             ImGui.TextColored(_labelColor, $"Last: {_configuration.LastProcessedTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "Never"}");
 
-            // === LOG ENTRY - with text wrapping and dynamic height ===
+            // --- Row 3: Log Entry Display (fixed height) ---
+            float childHeight = 24;
             if (!string.IsNullOrEmpty(_configuration.LastFoundEntry))
             {
-                // Calculate appropriate height based on content
-                float textWidth = ImGui.CalcTextSize(_configuration.LastFoundEntry).X;
-                float availableWidth = contentWidth - 16; // Account for padding
-                float textHeight = ImGui.GetTextLineHeight();
+                ImGui.BeginChild("LogEntry", new Vector2(0, childHeight), true, ImGuiWindowFlags.NoScrollbar);
+                ImGui.TextWrapped(_configuration.LastFoundEntry);
+                ImGui.EndChild();
+            }
+            else
+            {
+                ImGui.Dummy(new Vector2(0, childHeight));
+            }
 
-                // Determine if text will wrap and calculate needed height
-                int lines = 1;
-                if (textWidth > availableWidth)
+            // --- Row 4: Controls (Enable, Interval, Delete) in a table ---
+            if (ImGui.BeginTable("ControlsTable", 3, ImGuiTableFlags.RowBg))
+            {
+                // Column 1: Enable checkbox
+                ImGui.TableNextColumn();
+                bool monitorLogs = _configuration.MonitorEnabled;
+                if (ImGui.Checkbox("Enable", ref monitorLogs))
                 {
-                    // Estimate number of lines needed (approximate)
-                    lines = Math.Min(3, (int)Math.Ceiling(textWidth / availableWidth));
+                    _configuration.MonitorEnabled = monitorLogs;
+                    _plugin.SaveConfiguration();
+                    UpdateStatus();
                 }
 
-                float boxHeight = (textHeight * lines) + 6; // Add padding
+                // Column 2: Interval controls (-, value, +)
+                ImGui.TableNextColumn();
+                ImGui.Text("Int:");
+                ImGui.SameLine();
+                if (ImGui.Button("-", new Vector2(16, 20)))
+                {
+                    _configuration.CheckIntervalMinutes = Math.Max(1, _configuration.CheckIntervalMinutes - 1);
+                    _plugin.SaveConfiguration();
+                }
+                ImGui.SameLine();
+                ImGui.Text($"{_configuration.CheckIntervalMinutes}");
+                ImGui.SameLine();
+                if (ImGui.Button("+", new Vector2(16, 20)))
+                {
+                    _configuration.CheckIntervalMinutes = Math.Min(60, _configuration.CheckIntervalMinutes + 1);
+                    _plugin.SaveConfiguration();
+                }
 
-                // Display with wrapped text
-                ImGui.PushStyleColor(ImGuiCol.FrameBg, new Vector4(0.10f, 0.10f, 0.12f, 0.8f));
-                ImGui.BeginChild("##Entry", new Vector2(contentWidth, boxHeight), true,
-                    ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-
-                // Push width constraint for wrapping and render text
-                ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + availableWidth);
-                ImGui.TextColored(_timerColor, _configuration.LastFoundEntry);
-                ImGui.PopTextWrapPos();
-
-                ImGui.EndChild();
-                ImGui.PopStyleColor();
+                // Column 3: Delete old log files checkbox
+                ImGui.TableNextColumn();
+                bool deleteOldFiles = _configuration.DeleteOldFiles;
+                if (ImGui.Checkbox("Delete", ref deleteOldFiles))
+                {
+                    _configuration.DeleteOldFiles = deleteOldFiles;
+                    _plugin.SaveConfiguration();
+                }
+                ImGui.EndTable();
             }
 
-            // === ALL CONTROLS ON ONE ROW - With more space ===
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(2, 2));
-            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(3, 2));
-
-            // Enable checkbox
-            bool monitorLogs = _configuration.MonitorEnabled;
-            if (ImGui.Checkbox("##EnableBox", ref monitorLogs))
+            // --- Row 5: Buttons (Check, Reset) and Config ---
+            if (ImGui.BeginTable("ButtonsTable", 3, ImGuiTableFlags.None))
             {
-                _configuration.MonitorEnabled = monitorLogs;
-                _plugin.SaveConfiguration();
-                UpdateStatus();
+                ImGui.TableNextColumn();
+                if (ImGui.Button("Check", new Vector2(55, 20)))
+                {
+                    _plugin.CheckLogs(true);
+                    UpdateStatus();
+                }
+                ImGui.TableNextColumn();
+                if (ImGui.Button("Reset", new Vector2(55, 20)))
+                {
+                    _configuration.LastProcessedTime = null;
+                    _configuration.LastFoundEntry = null;
+                    _configuration.LastProcessedFileName = null;
+                    _plugin.SaveConfiguration();
+                    UpdateStatus();
+                }
+                ImGui.TableNextColumn();
+                if (ImGui.Button("Config", new Vector2(60, 20)))
+                {
+                    _plugin.ToggleConfigWindow();
+                }
+                ImGui.EndTable();
             }
 
-            ImGui.SameLine(0, 1);
-            ImGui.Text("Enable");
-
-            // More space between controls
-            ImGui.SameLine(85);
-            ImGui.Text("Int:");
-            ImGui.SameLine(0, 5);
-
-            int interval = _configuration.CheckIntervalMinutes;
-
-            if (ImGui.Button("-", new Vector2(16, 20)))
-            {
-                interval = Math.Max(1, interval - 1);
-                _configuration.CheckIntervalMinutes = interval;
-                _plugin.SaveConfiguration();
-            }
-
-            ImGui.SameLine(0, 3);
-            ImGui.Text($"{interval}");
-
-            ImGui.SameLine(0, 3);
-            if (ImGui.Button("+", new Vector2(16, 20)))
-            {
-                interval = Math.Min(60, interval + 1);
-                _configuration.CheckIntervalMinutes = interval;
-                _plugin.SaveConfiguration();
-            }
-
-            // Check and Reset buttons on same row - much smaller fixed width
-            float buttonWidth = 55; // Fixed small width for each button
-
-            ImGui.SameLine(contentWidth - (buttonWidth * 2) - 2);
-            if (ImGui.Button("Check", new Vector2(buttonWidth, 20)))
-            {
-                _plugin.CheckLogs(true);
-                UpdateStatus();
-            }
-
-            ImGui.SameLine(0, 2);
-            if (ImGui.Button("Reset", new Vector2(buttonWidth, 20)))
-            {
-                _configuration.LastProcessedTime = null;
-                _configuration.LastFoundEntry = null;
-                _plugin.SaveConfiguration();
-                UpdateStatus();
-            }
-
-            ImGui.PopStyleVar(2);
-
-            // Cmd + Dir inputs
-            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 2));
-
+            // --- Row 6: Command and Directory Inputs ---
             ImGui.Text("Cmd:");
             ImGui.SameLine(40);
             ImGui.SetNextItemWidth(contentWidth - 43);
@@ -172,7 +155,6 @@ namespace SamplePlugin.Windows
                 _configuration.ChatCommand = command;
                 _plugin.SaveConfiguration();
             }
-
             ImGui.Text("Dir:");
             ImGui.SameLine(40);
             ImGui.SetNextItemWidth(contentWidth - 43);
@@ -184,28 +166,18 @@ namespace SamplePlugin.Windows
                 _plugin.SaveConfiguration();
             }
 
-            ImGui.PopStyleVar();
-
             // Restore styling
-            ImGui.PopStyleColor(5);
             ImGui.PopStyleVar(4);
+            ImGui.PopStyleColor(5);
         }
 
-        /// <summary>
-        /// Formats a TimeSpan into a compact string representation.
-        /// </summary>
         private string FormatTimeSpan(TimeSpan time)
         {
             if (time.TotalSeconds <= 0)
-            {
                 return "Now";
-            }
             return $"{(int)time.TotalMinutes}m {time.Seconds}s";
         }
 
-        /// <summary>
-        /// Updates the status text and color based on the monitor state.
-        /// </summary>
         public void UpdateStatus()
         {
             _logStatus = _configuration.MonitorEnabled ? "ACTIVE" : "DISABLED";
