@@ -1,20 +1,23 @@
-﻿using Dalamud.Configuration;
-using Dalamud.Plugin;
+using Dalamud.Configuration;
 using System;
 
-namespace SamplePlugin;
-
-[Serializable]
-public class Configuration : IPluginConfiguration
+namespace SamplePlugin
 {
-    public int Version { get; set; } = 0;
-
-    public bool IsConfigWindowMovable { get; set; } = true;
-    public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
-
-    // the below exist just to make saving less cumbersome
-    public void Save()
+    [Serializable]
+    public class Configuration : IPluginConfiguration
     {
-        Plugin.PluginInterface.SavePluginConfig(this);
+        public int Version { get; set; } = 1;
+
+        // Core settings
+        public bool MonitorEnabled { get; set; } = true;
+        public int CheckIntervalMinutes { get; set; } = 5;
+        public string ChatCommand { get; set; } = "/echo Ocean trip found!";
+
+        // Path settings
+        public string LogDirectory { get; set; } = @"D:\Rebornbuddy64 1.0.679.0\Logs";
+
+        // Tracking info
+        public DateTime? LastProcessedTime { get; set; } = null;
+        public string LastFoundEntry { get; set; } = null;
     }
 }
