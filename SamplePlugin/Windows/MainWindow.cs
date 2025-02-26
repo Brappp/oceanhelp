@@ -119,28 +119,23 @@ namespace SamplePlugin.Windows
                 ImGui.EndTable();
             }
 
-            // --- Row 5: Buttons (Check, Reset) and Config ---
-            if (ImGui.BeginTable("ButtonsTable", 3, ImGuiTableFlags.None))
+            // --- Row 5: Buttons (Check, Reset) ---
+            if (ImGui.BeginTable("ButtonsTable", 2, ImGuiTableFlags.None))
             {
                 ImGui.TableNextColumn();
-                if (ImGui.Button("Check", new Vector2(55, 20)))
+                if (ImGui.Button("Check", new Vector2(85, 20)))
                 {
                     _plugin.CheckLogs(true);
                     UpdateStatus();
                 }
                 ImGui.TableNextColumn();
-                if (ImGui.Button("Reset", new Vector2(55, 20)))
+                if (ImGui.Button("Reset", new Vector2(85, 20)))
                 {
                     _configuration.LastProcessedTime = null;
                     _configuration.LastFoundEntry = null;
                     _configuration.LastProcessedFileName = null;
                     _plugin.SaveConfiguration();
                     UpdateStatus();
-                }
-                ImGui.TableNextColumn();
-                if (ImGui.Button("Config", new Vector2(60, 20)))
-                {
-                    _plugin.ToggleConfigWindow();
                 }
                 ImGui.EndTable();
             }

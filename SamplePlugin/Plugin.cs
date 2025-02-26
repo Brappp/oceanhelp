@@ -41,7 +41,6 @@ namespace SamplePlugin
         private CancellationTokenSource _cancellationTokenSource;
         private readonly WindowSystem _windowSystem;
         private readonly MainWindow _mainWindow;
-        private ConfigWindow _configWindow; // New config window
         private Task _monitoringTask;
 
         [PluginService] public static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -72,9 +71,7 @@ namespace SamplePlugin
             // Setup window system and UI
             _windowSystem = new WindowSystem(Name);
             _mainWindow = new MainWindow(this);
-            _configWindow = new ConfigWindow(this); // Create config window
             _windowSystem.AddWindow(_mainWindow);
-            _windowSystem.AddWindow(_configWindow);
 
             PluginInterface.UiBuilder.Draw += DrawUI;
             PluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
@@ -404,12 +401,6 @@ namespace SamplePlugin
         private void OpenMainUi()
         {
             _mainWindow.IsOpen = true;
-        }
-
-        // Public method to toggle the config window
-        public void ToggleConfigWindow()
-        {
-            _configWindow.IsOpen = !_configWindow.IsOpen;
         }
     }
 }
