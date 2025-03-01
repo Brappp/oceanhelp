@@ -21,6 +21,10 @@ namespace SamplePlugin
         public string LastFoundEntry { get; set; } = null;
         public string LastProcessedFileName { get; set; } = null;
 
+        // Next boat time tracking
+        public DateTime? NextBoatTimeUtc { get; set; } = null;
+        public int? NextBoatMinutes { get; set; } = null;
+
         // Option to delete old log files after processing
         public bool DeleteOldFiles { get; set; } = false;
     }

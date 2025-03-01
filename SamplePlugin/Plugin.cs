@@ -10,6 +10,7 @@ using Dalamud.Plugin.Services;
 using System.Linq;
 using Dalamud.IoC;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace SamplePlugin
 {
@@ -27,6 +28,12 @@ namespace SamplePlugin
         private DateTime? _nextCommandExecutionTime;
         private bool _pendingExecution;
 
+        // Next boat time tracking (new)
+        public DateTime? NextBoatTimeUtc { get; private set; }
+        public int? NextBoatMinutes { get; private set; }
+        private CancellationTokenSource _countdownTokenSource;
+        private Task _countdownTask;
+
         // Timer properties for UI
         public TimeSpan TimeUntilNextCheck =>
             _lastCheckTime.AddMinutes(Configuration.CheckIntervalMinutes) - DateTime.Now;
@@ -36,12 +43,25 @@ namespace SamplePlugin
             _nextCommandExecutionTime.Value - DateTime.Now :
             null;
 
-        public bool HasPendingExecution => _pendingExecution;
+        // Next boat time properties (new)
+        public TimeSpan? TimeUntilNextBoat =>
+            NextBoatTimeUtc.HasValue ?
+            NextBoatTimeUtc.Value - DateTime.UtcNow :
+            null;
+
+        // Convert UTC time to EST time
+        public DateTime? NextBoatTimeEst =>
+            NextBoatTimeUtc.HasValue ?
+            ConvertUtcToEst(NextBoatTimeUtc.Value) :
+            null;
 
         private CancellationTokenSource _cancellationTokenSource;
         private readonly WindowSystem _windowSystem;
         private readonly MainWindow _mainWindow;
         private Task _monitoringTask;
+
+        // Eastern Standard Time zone info
+        private TimeZoneInfo _estTimeZone;
 
         [PluginService] public static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
         [PluginService] public static ICommandManager CommandManager { get; private set; } = null!;
@@ -50,6 +70,17 @@ namespace SamplePlugin
 
         public Plugin()
         {
+            // Initialize the EST time zone
+            try
+            {
+                _estTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Error($"Failed to get EST time zone: {ex.Message}. Will fall back to -5 hours offset.");
+                // We'll handle this in the ConvertUtcToEst method
+            }
+
             // Initialize configuration with defaults
             Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
@@ -77,9 +108,40 @@ namespace SamplePlugin
             PluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
             PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
 
+            // Restore next boat time if available
+            if (Configuration.NextBoatTimeUtc.HasValue)
+            {
+                NextBoatTimeUtc = Configuration.NextBoatTimeUtc;
+                NextBoatMinutes = Configuration.NextBoatMinutes;
+                StartCountdownTimer();
+            }
+
             // Start monitoring logs
             StartMonitoring();
             PluginLog.Information($"{Name} initialized with log directory: {LogDirectory}");
+        }
+
+        // Helper method to convert UTC to EST time
+        private DateTime ConvertUtcToEst(DateTime utcTime)
+        {
+            try
+            {
+                if (_estTimeZone != null)
+                {
+                    return TimeZoneInfo.ConvertTimeFromUtc(utcTime, _estTimeZone);
+                }
+                else
+                {
+                    // Fallback: EST is UTC-5 (ignoring daylight saving changes)
+                    return utcTime.AddHours(-5);
+                }
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Error($"Error converting to EST: {ex.Message}. Falling back to simple offset.");
+                // Fallback to simple offset
+                return utcTime.AddHours(-5);
+            }
         }
 
         private void EnsureConfigurationDefaults()
@@ -97,6 +159,7 @@ namespace SamplePlugin
         public void Dispose()
         {
             StopMonitoring();
+            StopCountdownTimer();
             PluginInterface.UiBuilder.Draw -= DrawUI;
             PluginInterface.UiBuilder.OpenConfigUi -= OpenConfigUi;
             PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
@@ -119,6 +182,12 @@ namespace SamplePlugin
                     if (Configuration.LastProcessedTime.HasValue)
                     {
                         ChatGui.Print($"Last check: {Configuration.LastProcessedTime.Value:yyyy-MM-dd HH:mm:ss.fff}");
+                    }
+                    if (NextBoatTimeUtc.HasValue)
+                    {
+                        // Update to show EST time instead of local time in 12-hour format
+                        ChatGui.Print($"Next boat: {NextBoatTimeEst:yyyy-MM-dd hh:mm:ss tt} EST time");
+                        ChatGui.Print($"Time until next boat: {TimeUntilNextBoat?.ToString(@"hh\:mm\:ss") ?? "Unknown"}");
                     }
                     break;
                 default:
@@ -151,6 +220,58 @@ namespace SamplePlugin
             }, _cancellationTokenSource.Token);
         }
 
+        private void StartCountdownTimer()
+        {
+            StopCountdownTimer();
+
+            if (!NextBoatTimeUtc.HasValue)
+                return;
+
+            _countdownTokenSource = new CancellationTokenSource();
+            _countdownTask = Task.Run(async () =>
+            {
+                while (!_countdownTokenSource.Token.IsCancellationRequested)
+                {
+                    // Check if boat time has passed
+                    if (NextBoatTimeUtc.HasValue && DateTime.UtcNow > NextBoatTimeUtc.Value)
+                    {
+                        PluginLog.Information("Boat arrival time passed. Clearing next boat time.");
+                        NextBoatTimeUtc = null;
+                        NextBoatMinutes = null;
+                        Configuration.NextBoatTimeUtc = null;
+                        Configuration.NextBoatMinutes = null;
+                        SaveConfiguration();
+                        _mainWindow.UpdateStatus();
+                        break;
+                    }
+
+                    // Update UI
+                    _mainWindow.UpdateStatus();
+
+                    try
+                    {
+                        // Update every second
+                        await Task.Delay(TimeSpan.FromSeconds(1), _countdownTokenSource.Token);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+                }
+            }, _countdownTokenSource.Token);
+        }
+
+        private void StopCountdownTimer()
+        {
+            if (_countdownTokenSource != null)
+            {
+                _countdownTokenSource.Cancel();
+                _countdownTask?.Wait();
+                _countdownTokenSource.Dispose();
+                _countdownTokenSource = null;
+            }
+        }
+
         private void StopMonitoring()
         {
             if (_cancellationTokenSource != null)
@@ -174,6 +295,7 @@ namespace SamplePlugin
             try
             {
                 _lastCheckTime = DateTime.Now;
+                DateTime currentTime = DateTime.Now;
 
                 // Ensure the log directory exists
                 if (!Directory.Exists(LogDirectory))
@@ -200,19 +322,22 @@ namespace SamplePlugin
                 DateTime lastProcessedTime = Configuration.LastProcessedTime ?? DateTime.MinValue;
                 string storedFile = Configuration.LastProcessedFileName;
 
+                PluginLog.Information($"Last processed time: {lastProcessedTime:yyyy-MM-dd HH:mm:ss.fff}");
+
                 // Local candidate variables for the most recent matching entry
                 DateTime? candidateEntryTime = null;
                 string candidateEntryLine = null;
                 string candidateFile = null;
+                int? candidateMinutes = null;
                 const string targetPhrase = "Next boat is in";
 
                 // Process every log file
                 foreach (var file in logFiles)
                 {
                     FileInfo fileInfo = new FileInfo(file);
-                    // Use the full LastWriteTime
-                    DateTime fileDate = fileInfo.LastWriteTime;
-                    PluginLog.Information($"Examining log file: {file} from {fileDate:yyyy-MM-dd}");
+                    // Get the file's last write time for context
+                    DateTime fileLastWriteTime = fileInfo.LastWriteTime;
+                    PluginLog.Information($"Examining log file: {file} from {fileLastWriteTime:yyyy-MM-dd HH:mm:ss}");
 
                     try
                     {
@@ -223,38 +348,55 @@ namespace SamplePlugin
                             {
                                 if (line.Contains("[Ocean Trip]") && line.Contains(targetPhrase))
                                 {
-                                    int closingBracket = line.IndexOf(']');
-                                    if (closingBracket > 0)
+                                    // Extract the timestamp more precisely
+                                    var timestampMatch = Regex.Match(line, @"\[([\d:\.]+)\s+\w\]");
+                                    if (timestampMatch.Success)
                                     {
-                                        string timeStr = line.Substring(1, closingBracket - 1).Split(' ')[0];
+                                        string timeStr = timestampMatch.Groups[1].Value;
                                         PluginLog.Information($"Found matching line: {line}");
                                         PluginLog.Information($"Time string extracted: {timeStr}");
-                                        string dateTimeStr = $"{fileDate:yyyy-MM-dd} {timeStr}";
-                                        if (DateTime.TryParseExact(dateTimeStr, "yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime entryTime))
+
+                                        // Extract minutes until next boat
+                                        int minutes = ExtractNextBoatMinutes(line);
+                                        PluginLog.Information($"Extracted next boat time: {minutes} minutes");
+
+                                        // Parse the time component from the log
+                                        if (TimeSpan.TryParse(timeStr, out TimeSpan logTimeOfDay))
                                         {
-                                            PluginLog.Information($"Parsed entry time: {entryTime:yyyy-MM-dd HH:mm:ss.fff}");
-                                            if (!candidateEntryTime.HasValue || entryTime > candidateEntryTime.Value)
+                                            // First, determine which day this entry belongs to based on timestamps and current time
+                                            DateTime entryDate = DetermineEntryDate(fileLastWriteTime, logTimeOfDay, currentTime);
+                                            DateTime entryTime = entryDate.Date + logTimeOfDay;
+
+                                            PluginLog.Information($"Constructed entry time: {entryTime:yyyy-MM-dd HH:mm:ss.fff}");
+
+                                            // Check if this entry is newer than our current candidate
+                                            if (!candidateEntryTime.HasValue || IsNewer(entryTime, candidateEntryTime.Value, currentTime))
                                             {
                                                 candidateEntryTime = entryTime;
                                                 candidateEntryLine = line;
                                                 candidateFile = file;
+                                                candidateMinutes = minutes;
+                                                PluginLog.Information($"New candidate entry found: {entryTime:yyyy-MM-dd HH:mm:ss.fff}");
                                             }
+                                            // For entries with same timestamp but from different files
                                             else if (entryTime == candidateEntryTime.Value &&
-                                                     (storedFile == null || !string.Equals(file, storedFile, StringComparison.OrdinalIgnoreCase)))
+                                                    (storedFile == null || !string.Equals(file, storedFile, StringComparison.OrdinalIgnoreCase)))
                                             {
                                                 candidateEntryTime = entryTime;
                                                 candidateEntryLine = line;
                                                 candidateFile = file;
+                                                candidateMinutes = minutes;
+                                                PluginLog.Information($"Same time but new file: {entryTime:yyyy-MM-dd HH:mm:ss.fff}");
                                             }
                                         }
                                         else
                                         {
-                                            PluginLog.Error($"Failed to parse date/time from: {dateTimeStr}");
+                                            PluginLog.Error($"Failed to parse time from: {timeStr}");
                                         }
                                     }
                                     else
                                     {
-                                        PluginLog.Warning($"Line format unexpected: {line}");
+                                        PluginLog.Warning($"Could not extract timestamp from line: {line}");
                                     }
                                 }
                             }
@@ -267,16 +409,58 @@ namespace SamplePlugin
                     }
                 }
 
+                if (candidateEntryTime.HasValue && candidateMinutes.HasValue)
+                {
+                    // Calculate next boat time in UTC (since log times are UTC)
+                    DateTime nextBoatTime = candidateEntryTime.Value.AddMinutes(candidateMinutes.Value);
+
+                    // Check if this is a new/different boat time
+                    bool isNewBoatTime = !NextBoatTimeUtc.HasValue ||
+                                         Math.Abs((nextBoatTime - NextBoatTimeUtc.Value).TotalMinutes) > 1;
+
+                    if (isNewBoatTime)
+                    {
+                        // Get EST time for logging purposes
+                        DateTime estBoatTime = ConvertUtcToEst(nextBoatTime);
+
+                        PluginLog.Information($"New boat time calculated: {nextBoatTime:yyyy-MM-dd HH:mm:ss} UTC, {estBoatTime:yyyy-MM-dd HH:mm:ss} EST");
+                        NextBoatTimeUtc = nextBoatTime;
+                        NextBoatMinutes = candidateMinutes.Value;
+
+                        // Save to configuration
+                        Configuration.NextBoatTimeUtc = nextBoatTime;
+                        Configuration.NextBoatMinutes = candidateMinutes.Value;
+                        SaveConfiguration();
+
+                        // Start countdown timer
+                        StartCountdownTimer();
+                    }
+                }
+
                 if (isForced)
                 {
                     if (candidateEntryTime.HasValue)
                     {
                         ChatGui.Print($"Latest ocean trip found: {candidateEntryLine}");
                         ChatGui.Print($"Entry time: {candidateEntryTime.Value:yyyy-MM-dd HH:mm:ss}, Last processed: {lastProcessedTime:yyyy-MM-dd HH:mm:ss}");
-                        bool isNew = candidateEntryTime.Value > lastProcessedTime ||
+
+                        bool isNew = IsNewer(candidateEntryTime.Value, lastProcessedTime, currentTime) ||
                                      (candidateEntryTime.Value == lastProcessedTime &&
                                       (storedFile == null || !string.Equals(candidateFile, storedFile, StringComparison.OrdinalIgnoreCase)));
+
                         ChatGui.Print($"Is new: {isNew}");
+
+                        if (NextBoatTimeUtc.HasValue)
+                        {
+                            // Update to show EST time instead of local time
+                            ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd HH:mm:ss} EST time");
+                            TimeSpan? timeUntilBoat = TimeUntilNextBoat;
+                            if (timeUntilBoat.HasValue)
+                            {
+                                ChatGui.Print($"Time until next boat: {timeUntilBoat.Value.ToString(@"hh\:mm\:ss")}");
+                            }
+                        }
+
                         ChatGui.Print("Forcing update of LastProcessedTime since this is a manual check.");
                         Configuration.LastProcessedTime = candidateEntryTime.Value;
                         Configuration.LastFoundEntry = candidateEntryLine;
@@ -288,38 +472,48 @@ namespace SamplePlugin
                         ChatGui.Print("No ocean trip entries found in logs.");
                     }
                 }
-                else if (candidateEntryTime.HasValue &&
-                    (candidateEntryTime.Value > lastProcessedTime ||
-                     (candidateEntryTime.Value == lastProcessedTime &&
-                      (storedFile == null || !string.Equals(candidateFile, storedFile, StringComparison.OrdinalIgnoreCase)))))
+                else if (candidateEntryTime.HasValue)
                 {
-                    ChatGui.Print("New ocean trip detected, command will be executed in 1 minute.");
-                    PluginLog.Information($"New ocean trip detected: {candidateEntryLine}");
-                    _pendingExecution = true;
-                    _nextCommandExecutionTime = DateTime.Now.AddMinutes(1);
-                    Configuration.LastProcessedTime = candidateEntryTime.Value;
-                    Configuration.LastFoundEntry = candidateEntryLine;
-                    Configuration.LastProcessedFileName = candidateFile;
-                    SaveConfiguration();
-                    Task.Run(async () =>
+                    bool isNew = IsNewer(candidateEntryTime.Value, lastProcessedTime, currentTime) ||
+                                 (candidateEntryTime.Value == lastProcessedTime &&
+                                  (storedFile == null || !string.Equals(candidateFile, storedFile, StringComparison.OrdinalIgnoreCase)));
+
+                    PluginLog.Information($"Candidate time: {candidateEntryTime.Value:yyyy-MM-dd HH:mm:ss.fff}, Last processed: {lastProcessedTime:yyyy-MM-dd HH:mm:ss.fff}, Is new: {isNew}");
+
+                    if (isNew)
                     {
-                        try
+                        ChatGui.Print("New ocean trip detected, command will be executed in 1 minute.");
+                        PluginLog.Information($"New ocean trip detected: {candidateEntryLine}");
+                        _pendingExecution = true;
+                        _nextCommandExecutionTime = DateTime.Now.AddMinutes(1);
+                        Configuration.LastProcessedTime = candidateEntryTime.Value;
+                        Configuration.LastFoundEntry = candidateEntryLine;
+                        Configuration.LastProcessedFileName = candidateFile;
+                        SaveConfiguration();
+                        Task.Run(async () =>
                         {
-                            await Task.Delay(TimeSpan.FromMinutes(1));
-                            ExecuteChatCommand(Configuration.ChatCommand);
-                        }
-                        catch (Exception ex)
-                        {
-                            PluginLog.Error($"Error during command execution: {ex.Message}");
-                            ChatGui.PrintError($"Error executing command: {ex.Message}");
-                        }
-                        finally
-                        {
-                            _pendingExecution = false;
-                            _nextCommandExecutionTime = null;
-                            PluginLog.Information("Command execution completed, resuming monitoring");
-                        }
-                    });
+                            try
+                            {
+                                await Task.Delay(TimeSpan.FromMinutes(1));
+                                ExecuteChatCommand(Configuration.ChatCommand);
+                            }
+                            catch (Exception ex)
+                            {
+                                PluginLog.Error($"Error during command execution: {ex.Message}");
+                                ChatGui.PrintError($"Error executing command: {ex.Message}");
+                            }
+                            finally
+                            {
+                                _pendingExecution = false;
+                                _nextCommandExecutionTime = null;
+                                PluginLog.Information("Command execution completed, resuming monitoring");
+                            }
+                        });
+                    }
+                    else
+                    {
+                        PluginLog.Information("No new ocean trip entries found");
+                    }
                 }
 
                 // Delete old files if enabled
@@ -351,6 +545,95 @@ namespace SamplePlugin
                 PluginLog.Error($"Error processing logs: {ex.Message}\n{ex.StackTrace}");
                 ChatGui.PrintError($"Error checking logs: {ex.Message}");
             }
+        }
+
+        // Helper method to extract minutes from the log line
+        private int ExtractNextBoatMinutes(string line)
+        {
+            try
+            {
+                // Pattern to match: "Next boat is in XX minutes"
+                var minutesMatch = Regex.Match(line, @"Next boat is in (\d+) minutes");
+                if (minutesMatch.Success && minutesMatch.Groups.Count > 1)
+                {
+                    if (int.TryParse(minutesMatch.Groups[1].Value, out int minutes))
+                    {
+                        return minutes;
+                    }
+                }
+                // Default if no match or failed to parse
+                return 60;
+            }
+            catch
+            {
+                // Default in case of errors
+                return 60;
+            }
+        }
+
+        // Helper method to determine which day a log entry belongs to
+        private DateTime DetermineEntryDate(DateTime fileLastWriteTime, TimeSpan logTimeOfDay, DateTime currentTime)
+        {
+            DateTime fileDate = fileLastWriteTime.Date;
+            DateTime now = currentTime.Date;
+
+            // Early morning hours (after midnight)
+            bool isAfterMidnight = logTimeOfDay.Hours < 6; // Consider times before 6 AM as potentially "after midnight"
+            bool isCurrentHourAfterMidnight = currentTime.Hour < 6;
+
+            // Late night hours (before midnight)
+            bool isLateNight = logTimeOfDay.Hours >= 22; // Consider times after 10 PM as "late night"
+
+            // Case 1: Log timestamp is from early morning (after midnight) and current time is also early morning
+            if (isAfterMidnight && isCurrentHourAfterMidnight)
+            {
+                PluginLog.Information($"Case 1: Entry from early morning today: {now:yyyy-MM-dd}");
+                return now; // Today
+            }
+
+            // Case 2: Log timestamp is from early morning (after midnight) but current time is not early morning
+            // This likely means the entry is from tomorrow morning (after today's midnight)
+            if (isAfterMidnight && !isCurrentHourAfterMidnight && fileLastWriteTime.Date == now)
+            {
+                PluginLog.Information($"Case 2: Entry from tomorrow morning: {now.AddDays(1):yyyy-MM-dd}");
+                return now.AddDays(1); // Tomorrow
+            }
+
+            // Case 3: Log timestamp is late night and current time is early morning
+            // This likely means the entry is from yesterday late night
+            if (isLateNight && isCurrentHourAfterMidnight && fileLastWriteTime.Date <= now)
+            {
+                PluginLog.Information($"Case 3: Entry from yesterday late night: {now.AddDays(-1):yyyy-MM-dd}");
+                return now.AddDays(-1); // Yesterday
+            }
+
+            // Default case: use the file's date
+            PluginLog.Information($"Default case: Using file date: {fileDate:yyyy-MM-dd}");
+            return fileDate;
+        }
+
+        // Helper method to compare timestamps, specially handling day transitions
+        private bool IsNewer(DateTime time1, DateTime time2, DateTime currentTime)
+        {
+            // Simple case: if dates are different by more than 1 day
+            if (Math.Abs((time1.Date - time2.Date).TotalDays) > 1)
+            {
+                return time1 > time2;
+            }
+
+            // Special case for day transition (midnight)
+            bool isTime1AfterMidnight = time1.Hour < 6 && time1.Date == currentTime.Date;
+            bool isTime2BeforeMidnight = time2.Hour >= 20 && time2.Date == currentTime.Date.AddDays(-1);
+
+            // If time1 is after midnight today and time2 is before midnight yesterday
+            if (isTime1AfterMidnight && isTime2BeforeMidnight)
+            {
+                PluginLog.Information($"Special case: {time1:HH:mm} today is newer than {time2:HH:mm} yesterday");
+                return true;
+            }
+
+            // Normal comparison
+            return time1 > time2;
         }
 
         private void ExecuteChatCommand(string command)

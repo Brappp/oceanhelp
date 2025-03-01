@@ -19,21 +19,36 @@ namespace SamplePlugin.Windows
         private readonly Vector4 _pendingColor = new Vector4(0.95f, 0.75f, 0.3f, 1f);
         private readonly Vector4 _borderColor = new Vector4(0.3f, 0.3f, 0.35f, 0.5f);
         private readonly Vector4 _labelColor = new Vector4(0.7f, 0.7f, 0.7f, 1f);
+        private readonly Vector4 _boatColor = new Vector4(0.3f, 0.8f, 0.9f, 1f);
 
         private Vector4 _statusColor;
+
+        // Eastern Standard Time zone info for conversion
+        private TimeZoneInfo _estTimeZone;
 
         public MainWindow(Plugin plugin)
             : base("Log Monitor###LogMonitor", ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
         {
             _plugin = plugin;
             _configuration = plugin.Configuration;
-            // Increase the window size slightly to accommodate extra UI elements
-            Size = new Vector2(400, 220);
+            // Increase the window size to accommodate boat time display
+            Size = new Vector2(400, 250);
             SizeConstraints = new WindowSizeConstraints
             {
-                MinimumSize = new Vector2(380, 210),
-                MaximumSize = new Vector2(500, 260)
+                MinimumSize = new Vector2(380, 250),
+                MaximumSize = new Vector2(500, 300)
             };
+
+            // Initialize EST timezone
+            try
+            {
+                _estTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            }
+            catch
+            {
+                // We'll handle this in the ConvertUtcToEst method
+            }
+
             UpdateStatus();
         }
 
@@ -63,6 +78,33 @@ namespace SamplePlugin.Windows
 
             // --- Row 2: Last Processed Time ---
             ImGui.TextColored(_labelColor, $"Last: {_configuration.LastProcessedTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "Never"}");
+
+            // --- Row 2.5: Next Boat Time (EST instead of local) ---
+            if (_plugin.NextBoatTimeUtc.HasValue)
+            {
+                // Convert UTC boat time to EST time directly
+                DateTime estBoatTime = ConvertUtcToEst(_plugin.NextBoatTimeUtc.Value);
+                TimeSpan? timeUntilBoat = _plugin.TimeUntilNextBoat;
+
+                // Display the next boat time with EST timezone label in 12-hour format
+                ImGui.TextColored(_boatColor, $"Boat: {estBoatTime:hh:mm:ss tt (MM/dd)} EST");
+                ImGui.SameLine(contentWidth * 0.70f);
+
+                // Display countdown
+                if (timeUntilBoat.HasValue)
+                {
+                    string countdownText = FormatLongTimeSpan(timeUntilBoat.Value);
+                    ImGui.TextColored(_boatColor, countdownText);
+                }
+                else
+                {
+                    ImGui.TextColored(_boatColor, "Arriving soon!");
+                }
+            }
+            else
+            {
+                ImGui.TextColored(_labelColor, "Next boat: Unknown");
+            }
 
             // --- Row 3: Log Entry Display (fixed height) ---
             float childHeight = 24;
@@ -134,6 +176,8 @@ namespace SamplePlugin.Windows
                     _configuration.LastProcessedTime = null;
                     _configuration.LastFoundEntry = null;
                     _configuration.LastProcessedFileName = null;
+                    _configuration.NextBoatTimeUtc = null;
+                    _configuration.NextBoatMinutes = null;
                     _plugin.SaveConfiguration();
                     UpdateStatus();
                 }
@@ -173,10 +217,45 @@ namespace SamplePlugin.Windows
             return $"{(int)time.TotalMinutes}m {time.Seconds}s";
         }
 
+        private string FormatLongTimeSpan(TimeSpan time)
+        {
+            if (time.TotalSeconds <= 0)
+                return "Now!";
+
+            if (time.TotalHours >= 1)
+            {
+                return $"{(int)time.TotalHours}h {time.Minutes}m {time.Seconds}s";
+            }
+
+            return $"{time.Minutes}m {time.Seconds}s";
+        }
+
         public void UpdateStatus()
         {
             _logStatus = _configuration.MonitorEnabled ? "ACTIVE" : "DISABLED";
             _statusColor = _configuration.MonitorEnabled ? _activeColor : _inactiveColor;
+        }
+
+        // Helper method to convert UTC to EST time
+        private DateTime ConvertUtcToEst(DateTime utcTime)
+        {
+            try
+            {
+                if (_estTimeZone != null)
+                {
+                    return TimeZoneInfo.ConvertTimeFromUtc(utcTime, _estTimeZone);
+                }
+                else
+                {
+                    // Fallback: EST is UTC-5 (ignoring daylight saving changes)
+                    return utcTime.AddHours(-5);
+                }
+            }
+            catch
+            {
+                // Fallback to simple offset
+                return utcTime.AddHours(-5);
+            }
         }
 
         public void Dispose()
