@@ -49,6 +49,9 @@ namespace SamplePlugin
             NextBoatTimeUtc.Value - DateTime.UtcNow :
             null;
 
+        // Flag to track if pre-arrival command has been executed
+        private bool _preArrivalCommandExecuted = false;
+
         // Convert UTC time to EST time
         public DateTime? NextBoatTimeEst =>
             NextBoatTimeUtc.HasValue ?
@@ -96,7 +99,7 @@ namespace SamplePlugin
             // Register chat command
             CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
             {
-                HelpMessage = "Commands: /logmonitor forcecheck, /logmonitor status"
+                HelpMessage = "Commands: /logmonitor forcecheck, /logmonitor status (includes pre-arrival command info)"
             });
 
             // Setup window system and UI
@@ -186,9 +189,29 @@ namespace SamplePlugin
                     if (NextBoatTimeUtc.HasValue)
                     {
                         // Update to show EST time instead of local time in 12-hour format
-                        ChatGui.Print($"Next boat: {NextBoatTimeEst:yyyy-MM-dd hh:mm:ss tt} EST time");
-                        ChatGui.Print($"Time until next boat: {TimeUntilNextBoat?.ToString(@"hh\:mm\:ss") ?? "Unknown"}");
+                        ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd hh:mm:ss tt} EST time");
+                        TimeSpan? timeUntilBoat = TimeUntilNextBoat;
+                        if (timeUntilBoat.HasValue)
+                        {
+                            ChatGui.Print($"Time until next boat: {timeUntilBoat.Value.ToString(@"hh\:mm\:ss")}");
+                            if (timeUntilBoat.Value.TotalMinutes > 1)
+                            {
+                                ChatGui.Print($"Pre-arrival command will execute in {(timeUntilBoat.Value.TotalMinutes - 1):F1} minutes");
+                            }
+
+                            // If less than 1 minute left and command not yet executed, show countdown
+                            if (timeUntilBoat.Value.TotalMinutes <= 1 && !_preArrivalCommandExecuted)
+                            {
+                                ChatGui.Print("Pre-arrival command will execute very soon!");
+                            }
+                            else if (_preArrivalCommandExecuted)
+                            {
+                                ChatGui.Print("Pre-arrival command has already been executed.");
+                            }
+                        }
                     }
+                    ChatGui.Print($"Main command: {Configuration.ChatCommand}");
+                    ChatGui.Print($"Pre-arrival command: {Configuration.PreArrivalCommand}");
                     break;
                 default:
                     ChatGui.Print("Available commands: /logmonitor forcecheck, /logmonitor status");
@@ -227,6 +250,9 @@ namespace SamplePlugin
             if (!NextBoatTimeUtc.HasValue)
                 return;
 
+            // Reset pre-arrival command execution flag
+            _preArrivalCommandExecuted = false;
+
             _countdownTokenSource = new CancellationTokenSource();
             _countdownTask = Task.Run(async () =>
             {
@@ -240,9 +266,25 @@ namespace SamplePlugin
                         NextBoatMinutes = null;
                         Configuration.NextBoatTimeUtc = null;
                         Configuration.NextBoatMinutes = null;
+                        _preArrivalCommandExecuted = false;
                         SaveConfiguration();
                         _mainWindow.UpdateStatus();
                         break;
+                    }
+
+                    // Check if we should execute the pre-arrival command (exactly 5 minute before boat arrives)
+                    if (NextBoatTimeUtc.HasValue && !_preArrivalCommandExecuted &&
+                        TimeUntilNextBoat.HasValue && TimeUntilNextBoat.Value.TotalMinutes <= 5 &&
+                        TimeUntilNextBoat.Value.TotalSeconds > 0)
+                    {
+                        PluginLog.Information("Executing pre-arrival command (5 minute before boat arrives).");
+                        _preArrivalCommandExecuted = true;
+
+                        // Execute command if it's set
+                        if (!string.IsNullOrWhiteSpace(Configuration.PreArrivalCommand))
+                        {
+                            ExecuteChatCommand(Configuration.PreArrivalCommand);
+                        }
                     }
 
                     // Update UI

@@ -31,12 +31,12 @@ namespace SamplePlugin.Windows
         {
             _plugin = plugin;
             _configuration = plugin.Configuration;
-            // Increase the window size to accommodate boat time display
-            Size = new Vector2(400, 250);
+            // Increase the window size to accommodate boat time display and pre-arrival command
+            Size = new Vector2(400, 240);
             SizeConstraints = new WindowSizeConstraints
             {
-                MinimumSize = new Vector2(380, 250),
-                MaximumSize = new Vector2(500, 300)
+                MinimumSize = new Vector2(380, 240),
+                MaximumSize = new Vector2(500, 330)
             };
 
             // Initialize EST timezone
@@ -90,15 +90,49 @@ namespace SamplePlugin.Windows
                 ImGui.TextColored(_boatColor, $"Boat: {estBoatTime:hh:mm:ss tt (MM/dd)} EST");
                 ImGui.SameLine(contentWidth * 0.70f);
 
-                // Display countdown
+                // Display countdown with color changes based on time remaining
                 if (timeUntilBoat.HasValue)
                 {
                     string countdownText = FormatLongTimeSpan(timeUntilBoat.Value);
-                    ImGui.TextColored(_boatColor, countdownText);
+
+                    // Determine color based on time remaining
+                    Vector4 countdownColor = _boatColor;
+
+                    // Change color to yellow when 10 minutes or less remain
+                    if (timeUntilBoat.Value.TotalMinutes <= 10)
+                    {
+                        countdownColor = new Vector4(0.95f, 0.85f, 0.1f, 1f); // Yellow
+                    }
+
+                    // Change color to red when 3 minutes or less remain
+                    if (timeUntilBoat.Value.TotalMinutes <= 3)
+                    {
+                        countdownColor = new Vector4(0.95f, 0.2f, 0.2f, 1f); // Red
+                    }
+
+                    // Make text bigger by pushing font scale
+                    float originalScale = ImGui.GetFont().Scale;
+                    ImGui.GetFont().Scale *= 1.2f; // Increase size by 20%
+                    ImGui.PushFont(ImGui.GetFont());
+
+                    ImGui.TextColored(countdownColor, countdownText);
+
+                    // Restore original font size
+                    ImGui.GetFont().Scale = originalScale;
+                    ImGui.PopFont();
                 }
                 else
                 {
-                    ImGui.TextColored(_boatColor, "Arriving soon!");
+                    // Make text bigger by pushing font scale
+                    float originalScale = ImGui.GetFont().Scale;
+                    ImGui.GetFont().Scale *= 1.2f; // Increase size by 20%
+                    ImGui.PushFont(ImGui.GetFont());
+
+                    ImGui.TextColored(new Vector4(0.95f, 0.2f, 0.2f, 1f), "Arriving soon!");
+
+                    // Restore original font size
+                    ImGui.GetFont().Scale = originalScale;
+                    ImGui.PopFont();
                 }
             }
             else
@@ -194,6 +228,19 @@ namespace SamplePlugin.Windows
                 _configuration.ChatCommand = command;
                 _plugin.SaveConfiguration();
             }
+
+            // --- Row 7: Pre-Arrival Command Input ---
+            ImGui.Text("Pre:");
+            ImGui.SameLine(40);
+            ImGui.SetNextItemWidth(contentWidth - 43);
+            string preArrivalCmd = _configuration.PreArrivalCommand;
+            if (ImGui.InputText("##PreCmd", ref preArrivalCmd, 256))
+            {
+                _configuration.PreArrivalCommand = preArrivalCmd;
+                _plugin.SaveConfiguration();
+            }
+
+            // --- Row 8: Directory Input ---
             ImGui.Text("Dir:");
             ImGui.SameLine(40);
             ImGui.SetNextItemWidth(contentWidth - 43);
