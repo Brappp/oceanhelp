@@ -11,10 +11,10 @@ namespace SamplePlugin
         // Core settings
         public bool MonitorEnabled { get; set; } = true;
         public int CheckIntervalMinutes { get; set; } = 5;
-        public string ChatCommand { get; set; } = "/echo Ocean trip found!";
+        public string ChatCommand { get; set; } = "/li inn";
 
         // Pre-arrival command (1 minute before boat arrives)
-        public string PreArrivalCommand { get; set; } = "/echo Boat arriving in 1 minute!";
+        public string PreArrivalCommand { get; set; } = "/li oceanfish";
 
         // Path settings
         public string LogDirectory { get; set; } = @"D:\Rebornbuddy64 1.0.679.0\Logs";

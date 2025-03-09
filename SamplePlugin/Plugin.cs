@@ -63,9 +63,6 @@ namespace SamplePlugin
         private readonly MainWindow _mainWindow;
         private Task _monitoringTask;
 
-        // Eastern Standard Time zone info
-        private TimeZoneInfo _estTimeZone;
-
         [PluginService] public static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
         [PluginService] public static ICommandManager CommandManager { get; private set; } = null!;
         [PluginService] public static IPluginLog PluginLog { get; private set; } = null!;
@@ -73,17 +70,6 @@ namespace SamplePlugin
 
         public Plugin()
         {
-            // Initialize the EST time zone
-            try
-            {
-                _estTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
-            }
-            catch (Exception ex)
-            {
-                PluginLog.Error($"Failed to get EST time zone: {ex.Message}. Will fall back to -5 hours offset.");
-                // We'll handle this in the ConvertUtcToEst method
-            }
-
             // Initialize configuration with defaults
             Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
@@ -111,10 +97,11 @@ namespace SamplePlugin
             PluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
             PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
 
-            // Restore next boat time if available
+            // Restore next boat time if available with proper Kind setting
             if (Configuration.NextBoatTimeUtc.HasValue)
             {
-                NextBoatTimeUtc = Configuration.NextBoatTimeUtc;
+                // Ensure the restored time is properly marked as UTC
+                NextBoatTimeUtc = DateTime.SpecifyKind(Configuration.NextBoatTimeUtc.Value, DateTimeKind.Utc);
                 NextBoatMinutes = Configuration.NextBoatMinutes;
                 StartCountdownTimer();
             }
@@ -124,27 +111,10 @@ namespace SamplePlugin
             PluginLog.Information($"{Name} initialized with log directory: {LogDirectory}");
         }
 
-        // Helper method to convert UTC to EST time
+        // Helper method to convert UTC to Eastern time with DST support
         private DateTime ConvertUtcToEst(DateTime utcTime)
         {
-            try
-            {
-                if (_estTimeZone != null)
-                {
-                    return TimeZoneInfo.ConvertTimeFromUtc(utcTime, _estTimeZone);
-                }
-                else
-                {
-                    // Fallback: EST is UTC-5 (ignoring daylight saving changes)
-                    return utcTime.AddHours(-5);
-                }
-            }
-            catch (Exception ex)
-            {
-                PluginLog.Error($"Error converting to EST: {ex.Message}. Falling back to simple offset.");
-                // Fallback to simple offset
-                return utcTime.AddHours(-5);
-            }
+            return TimeZoneHelper.ConvertUtcToEastern(utcTime);
         }
 
         private void EnsureConfigurationDefaults()
@@ -186,10 +156,12 @@ namespace SamplePlugin
                     {
                         ChatGui.Print($"Last check: {Configuration.LastProcessedTime.Value:yyyy-MM-dd HH:mm:ss.fff}");
                     }
-                    if (NextBoatTimeUtc.HasValue)
+                    if (NextBoatTimeUtc.HasValue && NextBoatTimeEst.HasValue)
                     {
-                        // Update to show EST time instead of local time in 12-hour format
-                        ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd hh:mm:ss tt} EST time");
+                        // Update to show Eastern Time with proper DST handling in 12-hour format
+                        string timeAbbr = TimeZoneHelper.GetEasternTimeAbbreviation(NextBoatTimeEst.Value);
+                        ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd hh:mm:ss tt} {timeAbbr} time");
+
                         TimeSpan? timeUntilBoat = TimeUntilNextBoat;
                         if (timeUntilBoat.HasValue)
                         {
@@ -454,7 +426,10 @@ namespace SamplePlugin
                 if (candidateEntryTime.HasValue && candidateMinutes.HasValue)
                 {
                     // Calculate next boat time in UTC (since log times are UTC)
-                    DateTime nextBoatTime = candidateEntryTime.Value.AddMinutes(candidateMinutes.Value);
+                    // Ensure the calculated time is properly marked as UTC
+                    DateTime nextBoatTime = DateTime.SpecifyKind(
+                        candidateEntryTime.Value.AddMinutes(candidateMinutes.Value),
+                        DateTimeKind.Utc);
 
                     // Check if this is a new/different boat time
                     bool isNewBoatTime = !NextBoatTimeUtc.HasValue ||
@@ -462,10 +437,11 @@ namespace SamplePlugin
 
                     if (isNewBoatTime)
                     {
-                        // Get EST time for logging purposes
+                        // Get Eastern Time for logging purposes with proper DST handling
                         DateTime estBoatTime = ConvertUtcToEst(nextBoatTime);
+                        string timeAbbr = TimeZoneHelper.GetEasternTimeAbbreviation(estBoatTime);
 
-                        PluginLog.Information($"New boat time calculated: {nextBoatTime:yyyy-MM-dd HH:mm:ss} UTC, {estBoatTime:yyyy-MM-dd HH:mm:ss} EST");
+                        PluginLog.Information($"New boat time calculated: {nextBoatTime:yyyy-MM-dd HH:mm:ss} UTC, {estBoatTime:yyyy-MM-dd HH:mm:ss} {timeAbbr}");
                         NextBoatTimeUtc = nextBoatTime;
                         NextBoatMinutes = candidateMinutes.Value;
 
@@ -492,10 +468,12 @@ namespace SamplePlugin
 
                         ChatGui.Print($"Is new: {isNew}");
 
-                        if (NextBoatTimeUtc.HasValue)
+                        if (NextBoatTimeUtc.HasValue && NextBoatTimeEst.HasValue)
                         {
-                            // Update to show EST time instead of local time
-                            ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd HH:mm:ss} EST time");
+                            // Update to show Eastern Time with proper DST handling
+                            string timeAbbr = TimeZoneHelper.GetEasternTimeAbbreviation(NextBoatTimeEst.Value);
+                            ChatGui.Print($"Next boat arrival: {NextBoatTimeEst:yyyy-MM-dd HH:mm:ss} {timeAbbr} time");
+
                             TimeSpan? timeUntilBoat = TimeUntilNextBoat;
                             if (timeUntilBoat.HasValue)
                             {

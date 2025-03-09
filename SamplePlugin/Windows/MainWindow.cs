@@ -23,9 +23,6 @@ namespace SamplePlugin.Windows
 
         private Vector4 _statusColor;
 
-        // Eastern Standard Time zone info for conversion
-        private TimeZoneInfo _estTimeZone;
-
         public MainWindow(Plugin plugin)
             : base("Log Monitor###LogMonitor", ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
         {
@@ -38,16 +35,6 @@ namespace SamplePlugin.Windows
                 MinimumSize = new Vector2(380, 240),
                 MaximumSize = new Vector2(500, 330)
             };
-
-            // Initialize EST timezone
-            try
-            {
-                _estTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
-            }
-            catch
-            {
-                // We'll handle this in the ConvertUtcToEst method
-            }
 
             UpdateStatus();
         }
@@ -79,15 +66,16 @@ namespace SamplePlugin.Windows
             // --- Row 2: Last Processed Time ---
             ImGui.TextColored(_labelColor, $"Last: {_configuration.LastProcessedTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "Never"}");
 
-            // --- Row 2.5: Next Boat Time (EST instead of local) ---
+            // --- Row 2.5: Next Boat Time (Eastern Time with proper DST handling) ---
             if (_plugin.NextBoatTimeUtc.HasValue)
             {
-                // Convert UTC boat time to EST time directly
+                // Convert UTC boat time to Eastern time with DST support
                 DateTime estBoatTime = ConvertUtcToEst(_plugin.NextBoatTimeUtc.Value);
                 TimeSpan? timeUntilBoat = _plugin.TimeUntilNextBoat;
 
-                // Display the next boat time with EST timezone label in 12-hour format
-                ImGui.TextColored(_boatColor, $"Boat: {estBoatTime:hh:mm:ss tt (MM/dd)} EST");
+                // Display the next boat time with correct timezone label in 12-hour format
+                string timeAbbr = TimeZoneHelper.GetEasternTimeAbbreviation(estBoatTime);
+                ImGui.TextColored(_boatColor, $"Boat: {estBoatTime:hh:mm:ss tt (MM/dd)} {timeAbbr}");
                 ImGui.SameLine(contentWidth * 0.70f);
 
                 // Display countdown with color changes based on time remaining
@@ -283,26 +271,10 @@ namespace SamplePlugin.Windows
             _statusColor = _configuration.MonitorEnabled ? _activeColor : _inactiveColor;
         }
 
-        // Helper method to convert UTC to EST time
+        // Helper method to convert UTC to Eastern time with DST support
         private DateTime ConvertUtcToEst(DateTime utcTime)
         {
-            try
-            {
-                if (_estTimeZone != null)
-                {
-                    return TimeZoneInfo.ConvertTimeFromUtc(utcTime, _estTimeZone);
-                }
-                else
-                {
-                    // Fallback: EST is UTC-5 (ignoring daylight saving changes)
-                    return utcTime.AddHours(-5);
-                }
-            }
-            catch
-            {
-                // Fallback to simple offset
-                return utcTime.AddHours(-5);
-            }
+            return TimeZoneHelper.ConvertUtcToEastern(utcTime);
         }
 
         public void Dispose()
