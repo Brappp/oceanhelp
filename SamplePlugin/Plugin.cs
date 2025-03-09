@@ -103,7 +103,19 @@ namespace SamplePlugin
                 // Ensure the restored time is properly marked as UTC
                 NextBoatTimeUtc = DateTime.SpecifyKind(Configuration.NextBoatTimeUtc.Value, DateTimeKind.Utc);
                 NextBoatMinutes = Configuration.NextBoatMinutes;
+
+                // Important: Reset the pre-arrival command execution flag on startup
+                _preArrivalCommandExecuted = false;
+
+                // Start countdown timer for commands
                 StartCountdownTimer();
+
+                // Log that we restored boat time
+                PluginLog.Information($"Restored next boat time: {NextBoatTimeUtc:yyyy-MM-dd HH:mm:ss} UTC");
+                if (TimeUntilNextBoat.HasValue)
+                {
+                    PluginLog.Information($"Time until next boat: {TimeUntilNextBoat.Value.TotalMinutes:F1} minutes");
+                }
             }
 
             // Start monitoring logs
@@ -224,6 +236,7 @@ namespace SamplePlugin
 
             // Reset pre-arrival command execution flag
             _preArrivalCommandExecuted = false;
+            PluginLog.Information($"Starting countdown timer, reset pre-arrival flag to false");
 
             _countdownTokenSource = new CancellationTokenSource();
             _countdownTask = Task.Run(async () =>
@@ -244,19 +257,45 @@ namespace SamplePlugin
                         break;
                     }
 
-                    // Check if we should execute the pre-arrival command (exactly 5 minute before boat arrives)
+                    // Check if we should execute the pre-arrival command
+                    // Changed condition from 5 minutes to 1 minute to match original code
                     if (NextBoatTimeUtc.HasValue && !_preArrivalCommandExecuted &&
-                        TimeUntilNextBoat.HasValue && TimeUntilNextBoat.Value.TotalMinutes <= 5 &&
+                        TimeUntilNextBoat.HasValue && TimeUntilNextBoat.Value.TotalMinutes <= 1.0 &&
                         TimeUntilNextBoat.Value.TotalSeconds > 0)
                     {
-                        PluginLog.Information("Executing pre-arrival command (5 minute before boat arrives).");
+                        PluginLog.Information($"Pre-arrival check: Minutes={TimeUntilNextBoat.Value.TotalMinutes:F2}, Seconds={TimeUntilNextBoat.Value.TotalSeconds:F1}");
+                        PluginLog.Information("Executing pre-arrival command (1 minute before boat arrives).");
+
                         _preArrivalCommandExecuted = true;
 
                         // Execute command if it's set
                         if (!string.IsNullOrWhiteSpace(Configuration.PreArrivalCommand))
                         {
-                            ExecuteChatCommand(Configuration.PreArrivalCommand);
+                            try
+                            {
+                                PluginLog.Information($"Executing pre-arrival command: {Configuration.PreArrivalCommand}");
+                                ExecuteChatCommand(Configuration.PreArrivalCommand);
+                                ChatGui.Print("Pre-arrival command executed!");
+                            }
+                            catch (Exception ex)
+                            {
+                                PluginLog.Error($"Error executing pre-arrival command: {ex.Message}");
+                                ChatGui.PrintError($"Error executing pre-arrival command: {ex.Message}");
+                            }
                         }
+                        else
+                        {
+                            PluginLog.Information("No pre-arrival command set, skipping execution");
+                        }
+                    }
+
+                    // Periodic logging of time remaining
+                    if (NextBoatTimeUtc.HasValue && TimeUntilNextBoat.HasValue &&
+                        (int)TimeUntilNextBoat.Value.TotalMinutes % 5 == 0 &&
+                        TimeUntilNextBoat.Value.Seconds == 0)
+                    {
+                        int minutes = (int)TimeUntilNextBoat.Value.TotalMinutes;
+                        PluginLog.Information($"Time until boat: {minutes} minutes");
                     }
 
                     // Update UI
@@ -450,6 +489,9 @@ namespace SamplePlugin
                         Configuration.NextBoatMinutes = candidateMinutes.Value;
                         SaveConfiguration();
 
+                        // Reset pre-arrival execution flag for new boat time
+                        _preArrivalCommandExecuted = false;
+
                         // Start countdown timer
                         StartCountdownTimer();
                     }
@@ -504,18 +546,28 @@ namespace SamplePlugin
                     {
                         ChatGui.Print("New ocean trip detected, command will be executed in 1 minute.");
                         PluginLog.Information($"New ocean trip detected: {candidateEntryLine}");
+
+                        // Critical: Set these flags for command execution
                         _pendingExecution = true;
                         _nextCommandExecutionTime = DateTime.Now.AddMinutes(1);
+
+                        // Update configuration
                         Configuration.LastProcessedTime = candidateEntryTime.Value;
                         Configuration.LastFoundEntry = candidateEntryLine;
                         Configuration.LastProcessedFileName = candidateFile;
                         SaveConfiguration();
+
+                        // Execute the command after delay
                         Task.Run(async () =>
                         {
                             try
                             {
+                                PluginLog.Information($"Waiting 1 minute before executing command: {Configuration.ChatCommand}");
                                 await Task.Delay(TimeSpan.FromMinutes(1));
+
+                                PluginLog.Information($"Executing command: {Configuration.ChatCommand}");
                                 ExecuteChatCommand(Configuration.ChatCommand);
+                                ChatGui.Print("Command executed!");
                             }
                             catch (Exception ex)
                             {
@@ -663,18 +715,22 @@ namespace SamplePlugin
                 PluginLog.Error("Cannot execute empty chat command");
                 return;
             }
+
+            PluginLog.Information($"Executing command: {command}");
+
             if (command.StartsWith("/echo", StringComparison.OrdinalIgnoreCase))
             {
                 string message = command.Substring(5).Trim();
                 ChatGui.Print(message);
-                PluginLog.Information($"Printed debug message: {message}");
+                PluginLog.Information($"Printed echo message: {message}");
             }
             else
             {
                 try
                 {
+                    PluginLog.Information($"Processing game command: {command}");
                     CommandManager.ProcessCommand(command);
-                    PluginLog.Information($"Executed chat command: {command}");
+                    PluginLog.Information($"Game command executed successfully: {command}");
                 }
                 catch (Exception ex)
                 {
